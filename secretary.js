@@ -12,12 +12,16 @@ const MODE = process.env.MODE || "morning"; // "morning" | "tonight"
 
 const TZ = "Asia/Bangkok";
 const THAI_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
-const THAI_DAYS = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."];
 // เดียวกับ AUTO_EXCLUDE_TITLES ใน portal_gas — "สำนักงาน" คือ recurring block เวลาทำงานปกติ ไม่ใช่นัดหมายจริง
 const AUTO_EXCLUDE_TITLES = ["สำนักงาน"];
 // supSummary API ของระบบนิเทศการสอน (bklive-timetable) — byDate keyed "YYYY-MM-DD", กรองด้วย supervisee_id
 const SUP_API_URL = "https://script.google.com/macros/s/AKfycbwR_jmt3cY2cobLlbmn0BgXSaTaKrj4TIVe0z72yr1t6abHZWBNIG1xkTwIoNnnj2rs/exec?action=supSummary";
 const MY_TEACHER_ID = "T013";
+// ชีตสาธารณะ (CSV export, ไม่ต้อง auth) ของแอปตารางสอน bklive-timetable — ใช้ตัวเดียวกับที่หน้าเว็บดึงเอง
+const SCHEDULE_CSV_URL = "https://docs.google.com/spreadsheets/d/14ZyWxubxyrpJN3GGN8YE8llP6ynZHHMOHyzrh3v6sng/gviz/tq?tqx=out:csv";
+const SUBJECTS_CSV_URL = "https://docs.google.com/spreadsheets/d/1BYF9tLnaBX9IHXafD32i1s21NOlnYQKPgIrXoLI8asU/gviz/tq?tqx=out:csv";
+// class_id -> ชื่อห้อง (T013 สอนแค่มัธยม C17-C22 เท่านั้น — ตรงกับ const CL ใน timetable.html)
+const CLASS_NAMES = { C17: "ม.1/1", C18: "ม.1/2", C19: "ม.2/1", C20: "ม.2/2", C21: "ม.3/1", C22: "ม.3/2" };
 
 if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
   console.error("Missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN");
@@ -32,9 +36,16 @@ function bangkokDateParts(date) {
   return { y: Number(get("year")), m: Number(get("month")), d: Number(get("day")) };
 }
 
-function thaiDateLabel(date) {
-  const { y, m, d } = bangkokDateParts(date);
-  const weekday = THAI_DAYS[date.getUTCDay()] || "";
+// day-of-week ของปฏิทินวันนั้น (ไม่ผูกกับเวลา) — 0=อาทิตย์...6=เสาร์ ตรงกับ Schedule.day_of_week (1=จันทร์...5=ศุกร์) พอดี
+function dayOfWeekOf(y, m, d) {
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+function isoDateOf(y, m, d) {
+  return new Date(Date.UTC(y, m - 1, d)).toISOString().slice(0, 10);
+}
+
+function thaiDateLabel(y, m, d) {
   return `${d} ${THAI_MONTHS[m - 1]} ${y + 543}`;
 }
 
@@ -42,15 +53,16 @@ function thaiDateLabel(date) {
 function dayRangeBangkok(offsetDays) {
   const now = new Date();
   const { y, m, d } = bangkokDateParts(now);
+  const dd = d + offsetDays;
   // Asia/Bangkok has no DST, fixed UTC+7 — safe to construct offsets directly.
-  const startUtc = new Date(Date.UTC(y, m - 1, d + offsetDays, -7, 0, 0));
-  const endUtc = new Date(Date.UTC(y, m - 1, d + offsetDays + 1, -7, 0, 0));
-  return { start: startUtc, end: endUtc, label: thaiDateLabel(startUtc), isoDate: isoDateOf(y, m, d + offsetDays) };
-}
-
-function isoDateOf(y, m, d) {
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return dt.toISOString().slice(0, 10);
+  const startUtc = new Date(Date.UTC(y, m - 1, dd, -7, 0, 0));
+  const endUtc = new Date(Date.UTC(y, m - 1, dd + 1, -7, 0, 0));
+  return {
+    start: startUtc, end: endUtc,
+    label: thaiDateLabel(y, m, dd),
+    isoDate: isoDateOf(y, m, dd),
+    dow: dayOfWeekOf(y, m, dd)
+  };
 }
 
 async function getAccessToken() {
@@ -126,6 +138,53 @@ function formatSupervisionBlock(items) {
   return items.map(formatSupervisionLine).join("\n");
 }
 
+// gviz CSV export ใส่ quote ล้อมทุกฟิลด์เสมอ ("a","b",...) — ไม่มี comma ในฟิลด์ตามข้อมูลจริงที่เช็คแล้ว
+function parseCsv(text) {
+  return text.trim().split("\n").map(line =>
+    Array.from(line.matchAll(/"([^"]*)"/g)).map(m => m[1])
+  );
+}
+
+async function fetchCsvRows(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`CSV fetch HTTP ${res.status} (${url})`);
+  const rows = parseCsv(await res.text());
+  const headers = rows[0];
+  return rows.slice(1).map(row => Object.fromEntries(headers.map((h, i) => [h, row[i]])));
+}
+
+// ตารางสอนของ MY_TEACHER_ID ในวัน day_of_week ที่กำหนด เรียงตามคาบ
+async function fetchMySchedule(dow) {
+  if (dow === 0 || dow === 6) return []; // เสาร์-อาทิตย์ไม่มีคาบสอน
+  try {
+    const [schedule, subjects] = await Promise.all([
+      fetchCsvRows(SCHEDULE_CSV_URL),
+      fetchCsvRows(SUBJECTS_CSV_URL)
+    ]);
+    const subjectName = Object.fromEntries(subjects.map(s => [s.subject_id, s.subject_name]));
+    return schedule
+      .filter(r => r.teacher_id === MY_TEACHER_ID && Number(r.day_of_week) === dow && r.is_active === "TRUE")
+      .sort((a, b) => Number(a.period) - Number(b.period))
+      .map(r => ({
+        period: r.period,
+        start_time: r.start_time,
+        end_time: r.end_time,
+        subject_name: subjectName[r.subject_id] || r.subject_id,
+        class_name: CLASS_NAMES[r.class_id] || r.class_id
+      }));
+  } catch (err) {
+    console.error(`fetchMySchedule failed: ${err.message}`);
+    return [];
+  }
+}
+
+function formatScheduleBlock(periods) {
+  if (!periods.length) return "(ไม่มีคาบสอน)";
+  return periods
+    .map(p => `• คาบ ${p.period} (${p.start_time}-${p.end_time}) ${p.subject_name} — ${p.class_name}`)
+    .join("\n");
+}
+
 async function sendLineNotify(text) {
   if (DRY_RUN) {
     console.log("--- DRY RUN: would send LINE ---\n" + text);
@@ -163,12 +222,16 @@ async function main() {
     .map(off => dayRangeBangkok(off))
     .flatMap(day => mySupervisionOn(byDate, day.isoDate).map(item => ({ ...item, dayLabel: day.label })));
 
+  const mySchedule = await fetchMySchedule(mainDay.dow);
+
   const header = isTonight
     ? `🌙 สรุปพรุ่งนี้ (${mainDay.label})`
     : `🌅 สรุปวันนี้ (${mainDay.label})`;
 
   let text =
     `${header}\n` +
+    `━━━━━━━━━━\n` +
+    `📖 ตารางสอน:\n${formatScheduleBlock(mySchedule)}\n` +
     `━━━━━━━━━━\n` +
     `${formatEventBlock(mainEvents)}\n`;
 
