@@ -15,6 +15,9 @@ const THAI_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.
 const THAI_DAYS = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."];
 // เดียวกับ AUTO_EXCLUDE_TITLES ใน portal_gas — "สำนักงาน" คือ recurring block เวลาทำงานปกติ ไม่ใช่นัดหมายจริง
 const AUTO_EXCLUDE_TITLES = ["สำนักงาน"];
+// supSummary API ของระบบนิเทศการสอน (bklive-timetable) — byDate keyed "YYYY-MM-DD", กรองด้วย supervisee_id
+const SUP_API_URL = "https://script.google.com/macros/s/AKfycbwR_jmt3cY2cobLlbmn0BgXSaTaKrj4TIVe0z72yr1t6abHZWBNIG1xkTwIoNnnj2rs/exec?action=supSummary";
+const MY_TEACHER_ID = "T013";
 
 if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
   console.error("Missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN");
@@ -42,7 +45,12 @@ function dayRangeBangkok(offsetDays) {
   // Asia/Bangkok has no DST, fixed UTC+7 — safe to construct offsets directly.
   const startUtc = new Date(Date.UTC(y, m - 1, d + offsetDays, -7, 0, 0));
   const endUtc = new Date(Date.UTC(y, m - 1, d + offsetDays + 1, -7, 0, 0));
-  return { start: startUtc, end: endUtc, label: thaiDateLabel(startUtc) };
+  return { start: startUtc, end: endUtc, label: thaiDateLabel(startUtc), isoDate: isoDateOf(y, m, d + offsetDays) };
+}
+
+function isoDateOf(y, m, d) {
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.toISOString().slice(0, 10);
 }
 
 async function getAccessToken() {
@@ -78,17 +86,44 @@ async function listEvents(accessToken, start, end) {
 
 function formatEventLine(ev) {
   const title = ev.summary || "(ไม่มีชื่อกิจกรรม)";
-  if (ev.start.date) return `• (ทั้งวัน) ${title}`;
+  const mark = title.includes("สอบ") ? "📝 " : ""; // เตือนชัดๆ ถ้าเป็นเรื่องสอบ
+  if (ev.start.date) return `• ${mark}(ทั้งวัน) ${title}`;
   const time = new Date(ev.start.dateTime).toLocaleTimeString("th-TH", {
     timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false
   });
   const loc = ev.location ? ` @ ${ev.location}` : "";
-  return `• ${time} ${title}${loc}`;
+  return `• ${mark}${time} ${title}${loc}`;
 }
 
 function formatEventBlock(events) {
   if (!events.length) return "(ไม่มีนัดหมาย)";
   return events.map(formatEventLine).join("\n");
+}
+
+// ดึงตารางนิเทศทั้งหมดครั้งเดียว (repo bklive-timetable) แล้วกรองด้วย MY_TEACHER_ID ในแต่ละวันเอง
+async function fetchSupervisionByDate() {
+  try {
+    const res = await fetch(SUP_API_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    return json.byDate || {};
+  } catch (err) {
+    console.error(`supSummary fetch failed: ${err.message}`);
+    return {};
+  }
+}
+
+function mySupervisionOn(byDate, isoDate) {
+  return (byDate[isoDate] || []).filter(item => item.supervisee_id === MY_TEACHER_ID);
+}
+
+function formatSupervisionLine(item) {
+  return `• 🔍 คาบ ${item.period} วิชา${item.subject_name} (${item.class_name}) — ${item.role_th} ${item.supervisor_name}`;
+}
+
+function formatSupervisionBlock(items) {
+  if (!items.length) return null;
+  return items.map(formatSupervisionLine).join("\n");
 }
 
 async function sendLineNotify(text) {
@@ -117,21 +152,37 @@ async function main() {
   const mainEvents = await listEvents(accessToken, mainDay.start, mainDay.end);
 
   // "งานใกล้ครบกำหนด" window: next 3 days after the main day (per OS plan section 3.3)
-  const upcomingStart = dayRangeBangkok(isTonight ? 2 : 1).start;
-  const upcomingEnd = dayRangeBangkok(isTonight ? 4 : 3).end;
+  const upcomingDayOffsets = isTonight ? [2, 3, 4] : [1, 2, 3];
+  const upcomingStart = dayRangeBangkok(upcomingDayOffsets[0]).start;
+  const upcomingEnd = dayRangeBangkok(upcomingDayOffsets[upcomingDayOffsets.length - 1]).end;
   const upcomingEvents = await listEvents(accessToken, upcomingStart, upcomingEnd);
+
+  const byDate = await fetchSupervisionByDate();
+  const mySupToday = mySupervisionOn(byDate, mainDay.isoDate);
+  const upcomingSup = upcomingDayOffsets
+    .map(off => dayRangeBangkok(off))
+    .flatMap(day => mySupervisionOn(byDate, day.isoDate).map(item => ({ ...item, dayLabel: day.label })));
 
   const header = isTonight
     ? `🌙 สรุปพรุ่งนี้ (${mainDay.label})`
     : `🌅 สรุปวันนี้ (${mainDay.label})`;
 
-  const text =
+  let text =
     `${header}\n` +
     `━━━━━━━━━━\n` +
-    `${formatEventBlock(mainEvents)}\n` +
-    `━━━━━━━━━━\n` +
-    `📌 งานใกล้ครบกำหนด (3 วันข้างหน้า):\n` +
-    `${formatEventBlock(upcomingEvents)}`;
+    `${formatEventBlock(mainEvents)}\n`;
+
+  const mySupTodayBlock = formatSupervisionBlock(mySupToday);
+  if (mySupTodayBlock) {
+    text += `━━━━━━━━━━\n🔍 มีนิเทศการสอน!\n${mySupTodayBlock}\n`;
+  }
+
+  text += `━━━━━━━━━━\n📌 งานใกล้ครบกำหนด (3 วันข้างหน้า):\n${formatEventBlock(upcomingEvents)}`;
+
+  if (upcomingSup.length) {
+    text += `\n\n🔍 นิเทศที่จะถึง:\n` +
+      upcomingSup.map(item => `• ${item.dayLabel}: ${formatSupervisionLine(item).slice(2)}`).join("\n");
+  }
 
   console.log(text);
   await sendLineNotify(text);
