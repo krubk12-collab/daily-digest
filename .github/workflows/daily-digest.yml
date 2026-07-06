@@ -33,3 +33,17 @@ jobs:
           git add digests/
           git diff --staged --quiet || git commit -m "Add digest for $(date -u +%F)"
           git push
+
+      - name: Log to Run Ledger
+        if: always()
+        run: |
+          curl -sL -G "${{ secrets.LEDGER_URL }}" \
+            --data-urlencode "action=logRun" \
+            --data-urlencode "key=${{ secrets.LEDGER_KEY }}" \
+            --data-urlencode "source=github-actions" \
+            --data-urlencode "skill=daily-digest" \
+            --data-urlencode "stage=3" \
+            --data-urlencode "status=${{ job.status }}" \
+            --data-urlencode "summary=สรุปข่าว/ข้อมูลประจำวัน ส่ง LINE (10:00 น.)" \
+            --data-urlencode "link=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || true
