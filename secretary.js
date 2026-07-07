@@ -248,6 +248,19 @@ async function main() {
   }
 
   console.log(text);
+
+  // เก็บ log ไว้ให้ Dashboard อ่านย้อนหลัง (summaries/<วันที่รัน>-<โหมด>.md)
+  try {
+    const fs = require("fs");
+    const runIso = dayRangeBangkok(0).isoDate; // วันที่รันจริง (ทั้ง morning/tonight)
+    if (!fs.existsSync("summaries")) fs.mkdirSync("summaries", { recursive: true });
+    const fname = `summaries/${runIso}-${isTonight ? "tonight" : "morning"}.md`;
+    fs.writeFileSync(fname, text + "\n");
+    console.log("wrote log " + fname);
+  } catch (e) {
+    console.error("log write failed: " + e.message);
+  }
+
   await sendLineNotify(text);
 }
 
