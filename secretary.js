@@ -1,7 +1,7 @@
 // Personal Secretary — daily Google Calendar digest pushed to LINE.
 // Runs on GitHub Actions, no dependency on the local Windows machine.
-// MODE=tonight  -> runs ~18:00 Asia/Bangkok, summarizes TOMORROW + upcoming deadlines (3 days)
-// MODE=morning  -> runs ~06:00 Asia/Bangkok, summarizes TODAY + upcoming deadlines (3 days)
+// MODE=morning  -> runs ~06:00 Asia/Bangkok, summarizes TODAY + upcoming deadlines (5 days)
+// MODE=tonight  -> manual only (cron 18:00 ตัดออก 8 ก.ค. 69 — ซ้ำซ้อนกับสรุปเช้า), summarizes TOMORROW
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
@@ -96,20 +96,33 @@ async function listEvents(accessToken, start, end) {
   return items.filter(ev => !AUTO_EXCLUDE_TITLES.includes((ev.summary || "").trim()));
 }
 
-function formatEventLine(ev) {
+const THAI_DOW = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."];
+// วันที่ (Asia/Bangkok) ของ event — all-day ใช้ start.date ตรงๆ, แบบมีเวลาแปลงเป็นวันที่ไทย
+function eventIsoDate(ev) {
+  if (ev.start.date) return ev.start.date;
+  return new Date(ev.start.dateTime).toLocaleDateString("en-CA", { timeZone: TZ });
+}
+// "พฤ. 10 ก.ค." — ป้ายวันสั้นๆ นำหน้ารายการงานล่วงหน้า
+function shortThaiDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${THAI_DOW[dayOfWeekOf(y, m, d)]} ${d} ${THAI_MONTHS[m - 1]}`;
+}
+
+function formatEventLine(ev, withDate) {
   const title = ev.summary || "(ไม่มีชื่อกิจกรรม)";
   const mark = title.includes("สอบ") ? "📝 " : ""; // เตือนชัดๆ ถ้าเป็นเรื่องสอบ
-  if (ev.start.date) return `• ${mark}(ทั้งวัน) ${title}`;
+  const datePrefix = withDate ? `${shortThaiDate(eventIsoDate(ev))} ` : "";
+  if (ev.start.date) return `• ${datePrefix}${mark}(ทั้งวัน) ${title}`;
   const time = new Date(ev.start.dateTime).toLocaleTimeString("th-TH", {
     timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false
   });
   const loc = ev.location ? ` @ ${ev.location}` : "";
-  return `• ${mark}${time} ${title}${loc}`;
+  return `• ${datePrefix}${mark}${time} ${title}${loc}`;
 }
 
-function formatEventBlock(events) {
+function formatEventBlock(events, withDate) {
   if (!events.length) return "(ไม่มีนัดหมาย)";
-  return events.map(formatEventLine).join("\n");
+  return events.map(ev => formatEventLine(ev, withDate)).join("\n");
 }
 
 // ดึงตารางนิเทศทั้งหมดครั้งเดียว (repo bklive-timetable) แล้วกรองด้วย MY_TEACHER_ID ในแต่ละวันเอง
@@ -210,8 +223,8 @@ async function main() {
   const mainDay = dayRangeBangkok(isTonight ? 1 : 0);
   const mainEvents = await listEvents(accessToken, mainDay.start, mainDay.end);
 
-  // "งานใกล้ครบกำหนด" window: next 3 days after the main day (per OS plan section 3.3)
-  const upcomingDayOffsets = isTonight ? [2, 3, 4] : [1, 2, 3];
+  // "งานใกล้ครบกำหนด" window: next 5 days after the main day (ขยาย 3→5 ตามที่ผู้ใช้ขอ 8 ก.ค. 69)
+  const upcomingDayOffsets = isTonight ? [2, 3, 4, 5, 6] : [1, 2, 3, 4, 5];
   const upcomingStart = dayRangeBangkok(upcomingDayOffsets[0]).start;
   const upcomingEnd = dayRangeBangkok(upcomingDayOffsets[upcomingDayOffsets.length - 1]).end;
   const upcomingEvents = await listEvents(accessToken, upcomingStart, upcomingEnd);
@@ -240,7 +253,7 @@ async function main() {
     text += `━━━━━━━━━━\n🔍 มีนิเทศการสอน!\n${mySupTodayBlock}\n`;
   }
 
-  text += `━━━━━━━━━━\n📌 งานใกล้ครบกำหนด (3 วันข้างหน้า):\n${formatEventBlock(upcomingEvents)}`;
+  text += `━━━━━━━━━━\n📌 งานใกล้ครบกำหนด (5 วันข้างหน้า):\n${formatEventBlock(upcomingEvents, true)}`;
 
   if (upcomingSup.length) {
     text += `\n\n🔍 นิเทศที่จะถึง:\n` +
