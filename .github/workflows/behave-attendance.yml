@@ -1,0 +1,27 @@
+name: Behave Attendance Points
+
+# ให้คะแนนจากการมาเรียนอัตโนมัติ (bangkho.ac.th/behave ดึงสถิติจาก /check)
+# ใช้ GitHub Actions แทน cron ของโฮสต์ เพราะแพ็กเกจ DirectAdmin ของโรงเรียนปิด Cron Jobs ไว้
+on:
+  schedule:
+    - cron: '0 11 * * 1-5' # 11:00 UTC = 18:00 Asia/Bangkok จันทร์-ศุกร์ (หลังเลิกเรียน)
+  workflow_dispatch: {}
+
+jobs:
+  attendance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ให้คะแนนการมาเรียนของเมื่อวาน
+        env:
+          BEHAVE_CRON_URL: ${{ secrets.BEHAVE_CRON_URL }}
+        run: |
+          if [ -z "$BEHAVE_CRON_URL" ]; then
+            echo "::error::ยังไม่ได้ตั้ง secret BEHAVE_CRON_URL"; exit 1
+          fi
+          # ระบบปลายทางอ่านชีตรายเดือนของ Google Sheets จึงช้าได้ถึงเกือบนาที
+          code=$(curl -sS --max-time 300 -o out.json -w '%{http_code}' "$BEHAVE_CRON_URL")
+          echo "HTTP $code"
+          cat out.json
+          echo
+          # ถือว่าสำเร็จเฉพาะตอน ok:true เท่านั้น จะได้เห็นเมลแจ้งเตือนจาก GitHub ถ้าพัง
+          grep -q '"ok":true' out.json || { echo "::error::ให้คะแนนไม่สำเร็จ"; exit 1; }
