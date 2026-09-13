@@ -154,11 +154,13 @@ async function sendLineNotify(text) {
 async function main() {
   const sections = [`# สรุปข่าวประจำวัน Daily Digest — ${today}\n`];
   const highlights = [];
+  const results = [];
   let successCount = 0;
 
   for (const topic of TOPICS) {
     console.log(`--- [${topic.name}] ---`);
     const result = await digestTopic(topic);
+    results.push(result);
     sections.push(`## ${result.name}\n`);
     sections.push(`${result.full}\n`);
     highlights.push(result.success ? `${result.name}\n${result.highlight}` : result.highlight);
@@ -171,6 +173,17 @@ async function main() {
   const outFile = path.join(outDir, `${today}.md`);
   fs.writeFileSync(outFile, sections.join("\n"), "utf8");
   console.log(`Saved digest to ${outFile}`);
+
+  // แท็บ Gemini ใน bangkho.ac.th/home/news.html + แถบข่าววิ่งหน้าแรกอ่านไฟล์นี้
+  // พังหมดทุกหัวข้อ (เช่นชนเพดาน 429) = ไม่เขียนทับ เว็บจะโชว์ของล่าสุดที่ดีแทนข้อความ error
+  if (successCount > 0) {
+    const latest = {
+      date: today,
+      generated_at: new Date().toISOString(),
+      topics: results.filter(r => r.success).map(r => ({ name: r.name, highlight: r.highlight, full: r.full })),
+    };
+    fs.writeFileSync(path.join(outDir, "latest.json"), JSON.stringify(latest, null, 1), "utf8");
+  }
 
   const fullLink = DIGEST_BASE_URL ? `${DIGEST_BASE_URL}/${today}.md` : outFile;
   const summaryText =
