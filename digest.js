@@ -16,6 +16,7 @@ if (!GEMINI_API_KEY) {
 }
 
 const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" }); // YYYY-MM-DD
+const todayThai = new Date().toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "long", year: "numeric" }); // 13 กันยายน 2569
 
 const TOPICS = [
   { name: "📊 ราคาทอง และสินทรัพย์ GPF",
@@ -109,8 +110,18 @@ async function withRetry(fn, label, maxAttempts = 2) {
 
 async function digestTopic(topic) {
   try {
+    // ให้วันที่ทั้ง พ.ศ. และ ค.ศ. + บังคับตัดข่าวเก่า — เคยเจอ grounding ดึงข่าวปีก่อนมาปน
+    // (13 ก.ย. 69: "อนุทินขึ้นนายกฯ ก.ย." ซึ่งเป็นข่าว ก.ย. 68 เพราะคำว่า "กันยายน" ตรงกันทั้ง 2 ปี)
+    const prompt =
+      `วันนี้คือ ${todayThai} (ค.ศ. ${today}) ค้นข้อมูลล่าสุดเกี่ยวกับ: ${topic.query} ${todayThai}\n\n${topic.ask}\n\n` +
+      `กฎเรื่องความสดของข่าว (สำคัญมาก):\n` +
+      `- ใช้เฉพาะข่าว/ข้อมูลที่เผยแพร่หรือเกิดขึ้นภายใน 7 วันก่อน ${todayThai} เท่านั้น\n` +
+      `- ตรวจปีของแหล่งข่าวทุกชิ้น ระวังข่าวเดือนเดียวกันของปีก่อน ถ้าไม่แน่ใจวันที่หรือเก่ากว่า 7 วัน ให้ตัดทิ้ง ห้ามนำมาใช้\n` +
+      `- เหตุการณ์ที่มีวันที่ก่อน ${todayThai} คืออดีตแล้ว ห้ามเขียนเหมือนยังไม่เกิด\n` +
+      `- ท้ายแต่ละข้อใส่วันที่ของข่าวในวงเล็บ เช่น (12 ก.ย. 69)\n` +
+      `- ถ้าหัวข้อนี้ไม่มีข่าวใหม่ใน 7 วัน ให้บอกตรงๆ ว่าไม่มีความเคลื่อนไหวใหม่`;
     const full = await withRetry(
-      () => generateContent(FULL_MODEL, `ค้นข้อมูลล่าสุดวันนี้ (${today}) เกี่ยวกับ: ${topic.query}\n\n${topic.ask}`, true),
+      () => generateContent(FULL_MODEL, prompt, true),
       topic.name
     );
     const highlightPrompt =
