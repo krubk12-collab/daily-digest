@@ -185,6 +185,10 @@ async function main() {
   fs.writeFileSync(outFile, sections.join("\n"), "utf8");
   console.log(`Saved digest to ${outFile}`);
 
+  // รายการวันที่ให้แถบ "ข่าวย้อนหลัง" ใน news.html (อ่านจาก raw ตรงๆ ไม่ใช้ GitHub API ที่จำกัด 60 ครั้ง/ชม.ต่อ IP — ทั้งโรงเรียนออกเน็ต IP เดียว)
+  const dates = fs.readdirSync(outDir).filter(f => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).map(f => f.slice(0, 10)).sort().reverse();
+  fs.writeFileSync(path.join(outDir, "index.json"), JSON.stringify(dates), "utf8");
+
   // แท็บ Gemini ใน bangkho.ac.th/home/news.html + แถบข่าววิ่งหน้าแรกอ่านไฟล์นี้
   // พังหมดทุกหัวข้อ (เช่นชนเพดาน 429) = ไม่เขียนทับ เว็บจะโชว์ของล่าสุดที่ดีแทนข้อความ error
   if (successCount > 0) {
@@ -194,6 +198,7 @@ async function main() {
       topics: results.filter(r => r.success).map(r => ({ name: r.name, highlight: r.highlight, full: r.full })),
     };
     fs.writeFileSync(path.join(outDir, "latest.json"), JSON.stringify(latest, null, 1), "utf8");
+    fs.writeFileSync(path.join(outDir, `${today}.json`), JSON.stringify(latest, null, 1), "utf8"); // เก็บสรุปย่อไว้ดูย้อนหลัง (.md ไม่มีสรุปย่อ)
   }
 
   const fullLink = DIGEST_BASE_URL ? `${DIGEST_BASE_URL}/${today}.md` : outFile;
