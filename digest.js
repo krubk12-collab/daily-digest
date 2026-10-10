@@ -1,17 +1,21 @@
 // NotebookLM Daily Digest replacement — no browser cookies, no local machine dependency.
-// Runs on GitHub Actions (or locally for testing) using the Gemini API (real API key auth)
-// with Google Search grounding to research 6 topics, then sends one LINE summary/day.
+// Runs on GitHub Actions (or locally for testing): ดึงหัวข่าว 7 วันล่าสุดจาก Google News RSS (ฟรี ไม่ต้องใช้คีย์)
+// แล้วให้ DeepSeek สรุป (สำรอง Groq) 6 หัวข้อ ส่ง LINE วันละครั้ง
+// 💸 11ต.ค.69 เลิกใช้ Gemini + Google Search grounding (เครดิตหมด + เงื่อนไข grounding ห้ามเก็บลิงก์/ต้องโชว์ Search Suggestions)
 const fs = require("fs");
 const path = require("path");
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const PROVIDERS = [
+  { name: "deepseek", url: "https://api.deepseek.com/chat/completions", key: process.env.DEEPSEEK_API_KEY, model: "deepseek-chat" },
+  { name: "groq", url: "https://api.groq.com/openai/v1/chat/completions", key: process.env.GROQ_API_KEY, model: "qwen/qwen3.8-27b", extra: { reasoning_effort: "none" } },
+].filter(p => p.key);
 const LINE_NOTIFY_URL = process.env.LINE_NOTIFY_URL;
 const LINE_NOTIFY_KEY = process.env.LINE_NOTIFY_KEY;
 const DRY_RUN = process.env.DRY_RUN === "1";
 const DIGEST_BASE_URL = process.env.DIGEST_BASE_URL || ""; // e.g. https://github.com/OWNER/daily-digest/blob/main/digests
 
-if (!GEMINI_API_KEY) {
-  console.error("Missing GEMINI_API_KEY");
+if (!PROVIDERS.length) {
+  console.error("Missing DEEPSEEK_API_KEY / GROQ_API_KEY");
   process.exit(1);
 }
 
@@ -20,47 +24,69 @@ const todayThai = new Date().toLocaleDateString("th-TH", { timeZone: "Asia/Bangk
 
 const TOPICS = [
   { name: "📊 ราคาทอง และสินทรัพย์ GPF",
-    query: "ราคาทองคำล่าสุดวันนี้ แนวโน้มตลาดทอง กบข. สินทรัพย์ลงทุน",
+    query: "ราคาทองคำ OR กบข.",
     ask: "สรุปสถานการณ์ราคาทองคำและสินทรัพย์ลงทุน (กบข.) ล่าสุดวันนี้แบบกระชับ เน้นตัวเลขสำคัญและทิศทางที่ควรระวัง" },
   { name: "📋 ข่าว-ระเบียบ ศธ. สพฐ.",
-    query: "ข่าวประกาศระเบียบล่าสุด กระทรวงศึกษาธิการ สพฐ. โรงเรียน",
+    query: "สพฐ. OR กระทรวงศึกษาธิการ",
     ask: "สรุปข่าว/ระเบียบ/นโยบายล่าสุดจากกระทรวงศึกษาธิการและ สพฐ. ที่ครูควรรู้ แบบกระชับเป็นข้อๆ" },
   { name: "🤖 เทคโนโลยี-AI การศึกษา",
-    query: "ข่าวเทคโนโลยี AI การศึกษา เครื่องมือสอนใหม่",
+    query: "AI การศึกษา",
     ask: "สรุปข่าวเทคโนโลยี/AI ด้านการศึกษาที่น่าสนใจล่าสุด เน้นสิ่งที่ครูเอาไปใช้สอนได้จริง" },
   { name: "🌍 สถานการณ์โลก",
-    query: "ข่าวสถานการณ์โลกสำคัญล่าสุด",
+    query: "ข่าวต่างประเทศ",
     ask: "สรุปสถานการณ์โลกสำคัญล่าสุดแบบกระชับ ที่ส่งผลกระทบต่อไทยหรือควรติดตาม" },
   { name: "🦠 โรคระบาด-โรคอุบัติใหม่",
-    query: "ข่าวโรคระบาด โรคอุบัติใหม่ ล่าสุด สถานการณ์ในไทยและโลก",
+    query: "โรคระบาด OR โรคอุบัติใหม่",
     ask: "สรุปสถานการณ์โรคระบาด/โรคอุบัติใหม่ล่าสุดแบบกระชับ ที่ควรเฝ้าระวัง" },
   { name: "📈 หุ้นทั่วโลก",
-    query: "ข่าวสถานการณ์ตลาดหุ้นทั่วโลก ดัชนีสำคัญ ล่าสุด",
+    query: "ตลาดหุ้นโลก OR ดาวโจนส์",
     ask: "สรุปสถานการณ์ตลาดหุ้นทั่วโลกล่าสุดแบบกระชับ เน้นดัชนีสำคัญและทิศทาง" },
 ];
 
-const FULL_MODEL = "gemini-2.5-flash";
-
-async function generateContent(model, prompt, useSearch) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-  };
-  if (useSearch) body.tools = [{ google_search: {} }];
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gemini ${model} HTTP ${res.status}: ${errText.slice(0, 300)}`);
+// ถาม AI ทีละค่าย — ค่ายแรกพัง/ติดลิมิต/ตอบว่าง ค่อยไปค่ายถัดไป
+async function chat(prompt, maxTokens = 1500) {
+  let last;
+  for (const p of PROVIDERS) {
+    try {
+      const res = await fetch(p.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.key}` },
+        body: JSON.stringify({ model: p.model, ...(p.extra || {}), temperature: 0.3, max_tokens: maxTokens,
+          messages: [{ role: "user", content: prompt }] }),
+        signal: AbortSignal.timeout(120000),
+      });
+      const json = await res.json();
+      const text = json.choices?.[0]?.message?.content?.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      if (!res.ok || !text) throw new Error(`${p.name} HTTP ${res.status}: ${JSON.stringify(json.error || json).slice(0, 200)}`);
+      return text;
+    } catch (err) { last = err; console.error(`  ${p.name}: ${err.message}`); }
   }
-  const json = await res.json();
-  const text = json.candidates?.[0]?.content?.parts?.map(p => p.text).filter(Boolean).join("\n");
-  if (!text) throw new Error(`Gemini ${model} returned no text: ${JSON.stringify(json).slice(0, 300)}`);
-  return text.trim();
+  throw last;
+}
+
+// หัวข่าวจาก Google News RSS (when:7d = ภายใน 7 วัน) → [{title, source, date}] กรองวันที่ซ้ำอีกชั้น
+function decodeXml(s) {
+  return s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/<[^>]+>/g, "").trim();
+}
+async function fetchNews(query, max = 15) {
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query + " when:7d")}&hl=th&gl=TH&ceid=TH:th`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`Google News RSS HTTP ${res.status}`);
+  const xml = await res.text();
+  const cutoff = Date.now() - 7.5 * 86400e3;
+  const out = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const g = tag => (m[1].match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`)) || [])[1] || "";
+    const t = Date.parse(g("pubDate"));
+    if (!t || t < cutoff) continue;
+    const source = decodeXml(g("source"));
+    let title = decodeXml(g("title"));
+    if (source && title.endsWith(" - " + source)) title = title.slice(0, -(source.length + 3));
+    out.push({ title, source, date: new Date(t).toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", year: "2-digit" }) });
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 const MAX_HIGHLIGHT_LEN = 155;
@@ -112,18 +138,22 @@ async function digestTopic(topic) {
   try {
     // ให้วันที่ทั้ง พ.ศ. และ ค.ศ. + บังคับตัดข่าวเก่า — เคยเจอ grounding ดึงข่าวปีก่อนมาปน
     // (13 ก.ย. 69: "อนุทินขึ้นนายกฯ ก.ย." ซึ่งเป็นข่าว ก.ย. 68 เพราะคำว่า "กันยายน" ตรงกันทั้ง 2 ปี)
+    const news = await withRetry(() => fetchNews(topic.query), topic.name + " RSS");
+    if (!news.length) {
+      const none = "ไม่มีความเคลื่อนไหวใหม่ใน 7 วันที่ผ่านมา";
+      return { name: topic.name, success: true, full: none, highlight: none };
+    }
+    const list = news.map((n, i) => `${i + 1}. ${n.title} — ${n.source} (${n.date})`).join("\n");
     const prompt =
-      `วันนี้คือ ${todayThai} (ค.ศ. ${today}) ค้นข้อมูลล่าสุดเกี่ยวกับ: ${topic.query} ${todayThai}\n\n${topic.ask}\n\n` +
+      `วันนี้คือ ${todayThai} (ค.ศ. ${today}) ต่อไปนี้คือหัวข่าวล่าสุดจาก Google News เกี่ยวกับ: ${topic.query}\n\n${list}\n\n${topic.ask}\n\n` +
+      `ใช้เฉพาะข้อมูลในหัวข่าวด้านบนเท่านั้น ห้ามแต่งตัวเลขหรือรายละเอียดที่ไม่มีในหัวข่าว · หัวข่าวที่ซ้ำเรื่องเดียวกันให้รวมเป็นข้อเดียว · ข้ามหัวข่าวที่ไม่เกี่ยวกับหัวข้อ · เขียนเป็นข้อๆ 3-6 ข้อ · เริ่มที่ข้อแรกเลย ห้ามเขียนอารัมภบท ห้ามพูดถึง "หัวข่าวที่ให้มา\"\n\n` +
       `กฎเรื่องความสดของข่าว (สำคัญมาก):\n` +
       `- ใช้เฉพาะข่าว/ข้อมูลที่เผยแพร่หรือเกิดขึ้นภายใน 7 วันก่อน ${todayThai} เท่านั้น\n` +
       `- ตรวจปีของแหล่งข่าวทุกชิ้น ระวังข่าวเดือนเดียวกันของปีก่อน ถ้าไม่แน่ใจวันที่หรือเก่ากว่า 7 วัน ให้ตัดทิ้ง ห้ามนำมาใช้\n` +
       `- เหตุการณ์ที่มีวันที่ก่อน ${todayThai} คืออดีตแล้ว ห้ามเขียนเหมือนยังไม่เกิด\n` +
       `- ท้ายแต่ละข้อใส่วันที่ของข่าวในวงเล็บ เช่น (12 ก.ย. 69)\n` +
       `- ถ้าหัวข้อนี้ไม่มีข่าวใหม่ใน 7 วัน ให้บอกตรงๆ ว่าไม่มีความเคลื่อนไหวใหม่`;
-    const full = await withRetry(
-      () => generateContent(FULL_MODEL, prompt, true),
-      topic.name
-    );
+    const full = await withRetry(() => chat(prompt), topic.name);
     const highlightPrompt =
       `ต่อไปนี้คือเนื้อข่าวภาษาไทย จงเขียนสรุปเป็นภาษาไทย 1 ประโยคสั้นกระชับ ไม่เกิน 140 ตัวอักษร ` +
       `เน้นตัวเลข/ชื่อ/เหตุการณ์เด่นที่สุดในเนื้อข่าวนี้เท่านั้น ห้ามคำนวณเลขใดๆ ห้ามตอบเป็นภาษาอื่น ` +
@@ -131,7 +161,7 @@ async function digestTopic(topic) {
     let highlight = null;
     for (let i = 0; i < 2 && !highlight; i++) {
       try {
-        const hlRaw = await generateContent(FULL_MODEL, highlightPrompt, false);
+        const hlRaw = await chat(highlightPrompt, 300);
         const cleaned = cleanHighlight(hlRaw);
         if (looksLikeValidHighlight(cleaned)) highlight = cleaned;
       } catch (e) { /* retry or fall through to fallback below */ }
