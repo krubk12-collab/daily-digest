@@ -7,8 +7,8 @@ const path = require("path");
 
 // ai-hub (Cloudflare Worker) มาก่อน — นับโทเค็นให้ /apihub · hub ล่มก็ตกไปเรียกค่ายตรงด้วยคีย์เดิมด้านล่าง
 const PROVIDERS = [
-  { name: "hub", url: "https://ai-hub.krubk12.workers.dev/v1/chat/completions", key: process.env.AI_HUB_TOKEN, model: "deepseek-chat" },
-  { name: "deepseek", url: "https://api.deepseek.com/chat/completions", key: process.env.DEEPSEEK_API_KEY, model: "deepseek-chat" },
+  { name: "hub", url: "https://ai-hub.krubk12.workers.dev/v1/chat/completions", key: process.env.AI_HUB_TOKEN, model: "deepseek-flash", extra: { thinking: { type: "disabled" } } },
+  { name: "deepseek", url: "https://api.deepseek.com/chat/completions", key: process.env.DEEPSEEK_API_KEY, model: "deepseek-flash", extra: { thinking: { type: "disabled" } } },
   { name: "groq", url: "https://api.groq.com/openai/v1/chat/completions", key: process.env.GROQ_API_KEY, model: "qwen/qwen3.8-27b", extra: { reasoning_effort: "none" } },
 ].filter(p => p.key);
 const LINE_NOTIFY_URL = process.env.LINE_NOTIFY_URL;

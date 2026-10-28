@@ -2,7 +2,7 @@ name: Daily Digest
 
 on:
   schedule:
-    - cron: '0 3 * * *' # 03:00 UTC = 10:00 Asia/Bangkok
+    - cron: '15 4 * * *' # 04:15 UTC = 11:15 Asia/Bangkok — ช่วงลดราคา DeepSeek 11–13 น. (ย้ายจาก 10:00 เมื่อ 28ต.ค.69)
   workflow_dispatch: {}
 
 permissions:
