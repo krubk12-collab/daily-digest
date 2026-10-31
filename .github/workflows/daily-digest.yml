@@ -3,10 +3,14 @@ name: Daily Digest
 on:
   schedule:
     - cron: '15 4 * * *' # 04:15 UTC = 11:15 Asia/Bangkok — ช่วงลดราคา DeepSeek 11–13 น. (ย้ายจาก 10:00 เมื่อ 28ต.ค.69)
+    # ⏰ 31ต.ค.69 cron GitHub มาช้า 3–7 ชม. → ตัวหลักคือ Cloudflare Worker bangkho-watch-cron สั่ง workflow_dispatch 11:15 ตรงเวลา
+    #    cron นี้เหลือเป็นสำรอง (digest.js ข้ามเองถ้าวันนี้สรุปแล้ว)
   workflow_dispatch: {}
 
 permissions:
   contents: write
+
+concurrency: daily-digest   # สองรอบชนกันให้ต่อคิว ไม่รันพร้อมกัน
 
 jobs:
   digest:

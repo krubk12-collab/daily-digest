@@ -6,8 +6,16 @@ const fs = require("fs");
 const path = require("path");
 
 // ai-hub (Cloudflare Worker) มาก่อน — นับโทเค็นให้ /apihub · hub ล่มก็ตกไปเรียกค่ายตรงด้วยคีย์เดิมด้านล่าง
+// 🧪 31ต.ค.69 ทดลองแบ่งงาน: วันที่คู่ = Kimi, วันที่คี่ = Gemma 4 (TokenMe) ตัวหนึ่งพังก็ไปอีกตัว แล้วค่อยกลับ DeepSeek
+const HUB = "https://ai-hub.krubk12.workers.dev/v1/chat/completions";
+const TRIAL = [
+  { name: "hub:kimi", url: HUB, key: process.env.AI_HUB_TOKEN, model: "kimi-k3", extra: { reasoning_effort: "low" } },
+  { name: "hub:tokenme-gemma", url: HUB, key: process.env.AI_HUB_TOKEN, model: "tokenme:google/gemma-4-31b-it" },
+];
+if (+new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" }).slice(8) % 2) TRIAL.reverse();
 const PROVIDERS = [
-  { name: "hub", url: "https://ai-hub.krubk12.workers.dev/v1/chat/completions", key: process.env.AI_HUB_TOKEN, model: "deepseek-flash", extra: { thinking: { type: "disabled" } } },
+  ...TRIAL,
+  { name: "hub", url: HUB, key: process.env.AI_HUB_TOKEN, model: "deepseek-flash", extra: { thinking: { type: "disabled" } } },
   { name: "deepseek", url: "https://api.deepseek.com/chat/completions", key: process.env.DEEPSEEK_API_KEY, model: "deepseek-flash", extra: { thinking: { type: "disabled" } } },
   { name: "groq", url: "https://api.groq.com/openai/v1/chat/completions", key: process.env.GROQ_API_KEY, model: "qwen/qwen3.8-27b", extra: { reasoning_effort: "none" } },
 ].filter(p => p.key);
@@ -45,7 +53,8 @@ const TOPICS = [
     ask: "สรุปสถานการณ์ตลาดหุ้นทั่วโลกล่าสุดแบบกระชับ เน้นดัชนีสำคัญและทิศทาง" },
 ];
 
-// ถาม AI ทีละค่าย — ค่ายแรกพัง/ติดลิมิต/ตอบว่าง ค่อยไปค่ายถัดไป
+// ถาม AI ทีละค่าย — ค่ายแรกพัง/ติดลิมิต/ตอบว่าง ค่อยไปค่ายถัดไป · USED = ค่ายที่ตอบจริงวันนี้ (จดท้ายไฟล์ไว้เทียบคุณภาพ)
+const USED = new Set();
 async function chat(prompt, maxTokens = 1500) {
   let last;
   for (const p of PROVIDERS) {
@@ -60,6 +69,7 @@ async function chat(prompt, maxTokens = 1500) {
       const json = await res.json();
       const text = json.choices?.[0]?.message?.content?.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
       if (!res.ok || !text) throw new Error(`${p.name} HTTP ${res.status}: ${JSON.stringify(json.error || json).slice(0, 200)}`);
+      USED.add(p.name);
       return text;
     } catch (err) { last = err; console.error(`  ${p.name}: ${err.message}`); }
   }
@@ -195,6 +205,11 @@ async function sendLineNotify(text) {
 }
 
 async function main() {
+  // ⏰ Cloudflare Worker ปลุกตรงเวลา + cron GitHub (มาช้าหลายชั่วโมง) ยังเป็นสำรอง → รอบหลังเจอไฟล์วันนี้แล้วให้จบ ไม่ส่ง LINE ซ้ำ
+  if (!DRY_RUN && process.env.FORCE !== "1" && fs.existsSync(path.join(__dirname, "digests", `${today}.md`))) {
+    console.log(`วันนี้ (${today}) สรุปไปแล้ว — ข้าม (FORCE=1 เพื่อรันซ้ำ)`);
+    return;
+  }
   const sections = [`# สรุปข่าวประจำวัน Daily Digest — ${today}\n`];
   const highlights = [];
   const results = [];
@@ -214,6 +229,7 @@ async function main() {
   const outDir = path.join(__dirname, "digests");
   fs.mkdirSync(outDir, { recursive: true });
   const outFile = path.join(outDir, `${today}.md`);
+  sections.push(`---\n_สรุปโดย: ${[...USED].join(", ") || "-"}_\n`);
   fs.writeFileSync(outFile, sections.join("\n"), "utf8");
   console.log(`Saved digest to ${outFile}`);
 
@@ -227,6 +243,7 @@ async function main() {
     const latest = {
       date: today,
       generated_at: new Date().toISOString(),
+      ai: [...USED],
       topics: results.filter(r => r.success).map(r => ({ name: r.name, highlight: r.highlight, full: r.full })),
     };
     fs.writeFileSync(path.join(outDir, "latest.json"), JSON.stringify(latest, null, 1), "utf8");
